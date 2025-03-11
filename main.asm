@@ -17,7 +17,7 @@
 .equ SEGMENT_F = PD5
 .equ SEGMENT_G = PD6
 
-; Pines de control para multiplexación
+; Pines de control para multiplexaciÃ³n
 .equ DISPLAY1_PIN = PD7
 .equ DISPLAY2_PIN = PB0
 .equ DISPLAY3_PIN = PB1
@@ -84,26 +84,35 @@
 .org OVF0addr
     reti               ; Timer/Counter0 Overflow
 
-; Mover el inicio del código a 0x100 para evitar conflictos
-.org 0x100             ; Nueva dirección de inicio para el código
+; Mover el inicio del cÃ³digo a 0x100 para evitar conflictos
+.org 0x100             ; Nueva direcciÃ³n de inicio para el cÃ³digo
 
 ; Tablas de datos
-digit_table:           ; Tabla de patrones de 7 segmentos
-    .db 0x40, 0x79    ; 0, 1
-    .db 0x24, 0x30    ; 2, 3
-    .db 0x19, 0x12    ; 4, 5
-    .db 0x02, 0x78    ; 6, 7
-    .db 0x00, 0x10    ; 8, 9
+.cseg
+.org 0x100  ; Asegurar que comienza en una direcciÃ³n alineada
+digit_table:
+    .dw 0b00111111  ; 0
+    .dw 0b00000110  ; 1
+    .dw 0b01011011  ; 2
+    .dw 0b01001111  ; 3
+    .dw 0b01100110  ; 4
+    .dw 0b01101101  ; 5
+    .dw 0b01111101  ; 6
+    .dw 0b00000111  ; 7
+    .dw 0b01111111  ; 8
+    .dw 0b01101111  ; 9
 
-days_in_month:         ; Tabla de días por mes
+
+
+days_in_month:         ; Tabla de dÃ­as por mes
     .db 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 
 buzzer_pattern:
-    .db 0xFF, 0x00      ; Patrón simple de encendido/apagado para la alarma
+    .db 0xFF, 0x00      ; PatrÃ³n simple de encendido/apagado para la alarma
 
 ; Variables en SRAM
 .dseg
-.org 0x200            ; Mover las variables más arriba en la SRAM
+.org 0x200            ; Mover las variables mÃ¡s arriba en la SRAM
 current_hours:    .byte 1
 current_minutes:  .byte 1
 current_seconds:  .byte 1
@@ -126,13 +135,13 @@ button_debounce_timer: .byte 1
 
 
 RESET:
-    ; Inicialización del stack
+    ; InicializaciÃ³n del stack
     ldi r16, low(RAMEND)
     out SPL, r16
     ldi r16, high(RAMEND)
     out SPH, r16
 
-    ; Configuración de puertos
+    ; ConfiguraciÃ³n de puertos
     ; PORTB - Configurar salidas (displays 2-4, LEDs y buzzer)
     in r16, DDRB
     ori r16, (1<<BUZZER_PIN)|(1<<LED1_PIN)|(1<<LED2_PIN)|(1<<DISPLAY2_PIN)|(1<<DISPLAY3_PIN)|(1<<DISPLAY4_PIN)
@@ -157,14 +166,14 @@ RESET:
     clr r16
     out PORTD, r16       ; Inicialmente apagados
 
-    ; Configurar Timer0 para multiplexación (CTC, 4ms)
+    ; Configurar Timer0 para multiplexaciÃ³n (CTC, 4ms)
     ldi r16, (1<<WGM01)  ; Modo CTC
     out TCCR0A, r16
     ldi r16, (1<<CS01)|(1<<CS00)  ; Prescaler 64
     out TCCR0B, r16
     ldi r16, 249         ; Para 4ms con prescaler 64
     out OCR0A, r16
-    ldi r16, (1<<OCIE0A) ; Habilitar interrupción Compare Match A
+    ldi r16, (1<<OCIE0A) ; Habilitar interrupciÃ³n Compare Match A
     sts TIMSK0, r16
 
     ; Configurar Timer1 para base de tiempo (CTC, 500ms)
@@ -176,7 +185,7 @@ RESET:
     sts OCR1AH, r16
     ldi r16, low(7812)
     sts OCR1AL, r16
-    ldi r16, (1<<OCIE1A) ; Habilitar interrupción Compare Match A
+    ldi r16, (1<<OCIE1A) ; Habilitar interrupciÃ³n Compare Match A
     sts TIMSK1, r16
 
     ; Configurar Pin Change Interrupt para PORTC
@@ -234,8 +243,8 @@ PCINT1_ISR:
     ; Comparar con estado anterior
     lds r17, last_button_state
     mov r18, r16
-    eor r18, r17        ; r18 tendrá los bits que cambiaron
-    and r16, r18        ; r16 tendrá solo los botones que se presionaron
+    eor r18, r17        ; r18 tendrÃ¡ los bits que cambiaron
+    and r16, r18        ; r16 tendrÃ¡ solo los botones que se presionaron
 
     ; Verificar debounce timer
     lds r17, button_debounce_timer
@@ -263,7 +272,7 @@ pcint1_end:
 	
 
 
-; Rutinas de interrupción de timers
+; Rutinas de interrupciÃ³n de timers
 TIMER0_COMP:
     push r16
     in r16, SREG
@@ -279,7 +288,7 @@ TIMER0_COMP:
     sts button_debounce_timer, r16
 skip_debounce:
 
-    ; Manejar parpadeo en modo configuración
+    ; Manejar parpadeo en modo configuraciÃ³n
     lds r16, estado_actual
     cpi r16, STATE_SHOW_TIME
     breq no_blink
@@ -288,7 +297,7 @@ skip_debounce:
     cpi r16, STATE_SHOW_ALARM
     breq no_blink
     
-    ; En modo configuración, toggle estado de parpadeo cada 250ms
+    ; En modo configuraciÃ³n, toggle estado de parpadeo cada 250ms
     lds r16, digit_blink_state
     inc r16
     cpi r16, 63         ; ~250ms
@@ -298,10 +307,10 @@ save_blink:
     sts digit_blink_state, r16
     
 no_blink:
-    ; Multiplexación de displays
+    ; MultiplexaciÃ³n de displays
     call multiplex_displays
     
-    ; Contador de multiplexación
+    ; Contador de multiplexaciÃ³n
     lds r16, timer0_count
     inc r16
     cpi r16, 250       ; 250 * 4ms = 1s
@@ -324,14 +333,14 @@ TIMER1_COMP:
     push r16
     push r17
     
-    ; Contador para LED (ahora más lento)
+    ; Contador para LED (ahora mÃ¡s lento)
     lds r16, timer1_count
     inc r16
-    cpi r16, 5        ; Aumentado a 5 para un parpadeo más lento
+    cpi r16, 5        ; Aumentado a 5 para un parpadeo mÃ¡s lento
     brne save_timer1
     clr r16
     
-    ; Toggle estado de LEDs con encendido/apagado más definido
+    ; Toggle estado de LEDs con encendido/apagado mÃ¡s definido
     lds r17, led_state
     com r17
     sts led_state, r17
@@ -373,7 +382,7 @@ save_timer1:
     cpi r16, 24
     brne save_hours
     
-    ; Si llegamos a 24 horas, incrementar día
+    ; Si llegamos a 24 horas, incrementar dÃ­a
     clr r16
     sts current_hours, r16
     call increment_day
@@ -435,72 +444,90 @@ timer2_end:
     out PORTB, r16
     cbi PORTD, DISPLAY1_PIN
     
-    ; Obtener dígito actual
+    ; Obtener dÃ­gito actual
     lds r16, current_digit
-    
-    ; Verificar si estamos en modo configuración y si el dígito debe parpadear
+
+    ; Verificar si estamos en modo configuraciÃ³n y si el dÃ­gito debe parpadear
     lds r18, estado_actual
     cpi r18, STATE_SET_HOUR
-    breq check_hour_digit
+    brne check_minute_digit_label
+    jmp check_hour_digit
+
+check_minute_digit_label:
     cpi r18, STATE_SET_MINUTE
-    breq check_minute_digit
+    brne check_day_digit_label
+    jmp check_minute_digit
+
+check_day_digit_label:
     cpi r18, STATE_SET_DAY
-    breq check_day_digit
+    brne check_month_digit_label
+    jmp check_day_digit
+
+check_month_digit_label:
     cpi r18, STATE_SET_MONTH
-    breq check_month_digit
+    brne check_alarm_hour_label
+    jmp check_month_digit
+
+check_alarm_hour_label:
     cpi r18, STATE_SET_ALARM_HOUR
-    breq check_alarm_hour
+    brne check_alarm_minute_label
+    jmp check_alarm_hour
+
+check_alarm_minute_label:
     cpi r18, STATE_SET_ALARM_MINUTE
-    breq check_alarm_minute
-    jmp show_digit     ; No estamos en modo configuración
+    brne show_digit_label
+    jmp check_alarm_minute
+
+show_digit_label:
+    jmp show_digit     ; No estamos en modo configuraciÃ³n
 
 check_hour_digit:
-    cpi r16, 2          ; ¿Es dígito de hora? (0 o 1)
+    cpi r16, 2          ; Â¿Es dÃ­gito de hora? (0 o 1)
     brge show_digit     ; Si es >= 2, mostrar normal
     jmp check_blink    ; Si es 0 o 1, parpadear
 
 check_minute_digit:
-    cpi r16, 2          ; ¿Es dígito de minuto? (2 o 3)
-    brlt show_digit     ; Si es < 2, mostrar normal. BRLT: branch if less than
+    cpi r16, 2          ; Â¿Es dÃ­gito de minuto? (2 o 3)
+    brlt show_digit     ; Si es < 2, mostrar normal
     jmp check_blink    ; Si es 2 o 3, parpadear
 
 check_day_digit:
-    cpi r16, 2          ; ¿Es dígito de día? (0 o 1)
+    cpi r16, 2          ; Â¿Es dÃ­gito de dÃ­a? (0 o 1)
     brge show_digit     ; Si es >= 2, mostrar normal
     jmp check_blink    ; Si es 0 o 1, parpadear
 
 check_month_digit:
-    cpi r16, 2          ; ¿Es dígito de mes? (2 o 3)
+    cpi r16, 2          ; Â¿Es dÃ­gito de mes? (2 o 3)
     brlt show_digit     ; Si es < 2, mostrar normal
     jmp check_blink    ; Si es 2 o 3, parpadear
 
-check_alarm_hour: ;;;;;;;; !!!!! 
-    cpi r16, 2          ; ¿Es dígito de hora de alarma? (0 o 1)
+check_alarm_hour:
+    cpi r16, 2          ; Â¿Es dÃ­gito de hora de alarma? (0 o 1)
     brge show_digit     ; Si es >= 2, mostrar normal
     jmp check_blink    ; Si es 0 o 1, parpadear
 
 check_alarm_minute:
-    cpi r16, 2          ; ¿Es dígito de minuto de alarma? (2 o 3)
+    cpi r16, 2          ; Â¿Es dÃ­gito de minuto de alarma? (2 o 3)
     brlt show_digit     ; Si es < 2, mostrar normal
     jmp check_blink    ; Si es 2 o 3, parpadear
 
 check_blink:
     lds r18, digit_blink_state
     sbrc r18, 5         ; Parpadear cada ~250ms
-    jmp skip_digit     ; Si el bit 5 está en 1, no mostrar dígito
+    jmp skip_digit     ; Si el bit 5 estÃ¡ en 1, no mostrar dÃ­gito
 
 show_digit:
-    ; Cargar valor del dígito desde buffer
+    ; Cargar valor del dÃ­gito desde buffer
     ldi ZL, LOW(display_buffer)
     ldi ZH, HIGH(display_buffer)
     add ZL, r16
-    ld r17, Z          ; r17 contiene el número a mostrar (0-9)
+    ld r17, Z          ; r17 contiene el nÃºmero a mostrar (0-9)
     
-    ; Convertir a patrón de segmentos
+    ; Convertir a patrÃ³n de segmentos
     ldi ZL, LOW(2*digit_table)
     ldi ZH, HIGH(2*digit_table)
     add ZL, r17
-    lpm r17, Z         ; r17 ahora contiene el patrón de segmentos
+    lpm r17, Z         ; r17 ahora contiene el patrÃ³n de segmentos
     
     ; Mostrar segmentos
     out PORTD, r17
@@ -533,7 +560,7 @@ skip_digit:
     out PORTD, r17
     
 next_digit:
-    ; Incrementar índice de dígito actual
+    ; Incrementar Ã­ndice de dÃ­gito actual
     inc r16
     cpi r16, 4
     brne save_digit
@@ -582,7 +609,7 @@ read_buttons_end:
     pop r16
     ret
 
-; Rutina de verificación de estado
+; Rutina de verificaciÃ³n de estado
 check_state:
     push r16
     
@@ -597,7 +624,7 @@ check_state:
     cpi r16, STATE_ALARM_ON
     breq alarm_on_state
     
-    ; Estados de configuración
+    ; Estados de configuraciÃ³n
     cpi r16, STATE_SET_HOUR
     breq show_time_state
     cpi r16, STATE_SET_MINUTE
@@ -632,7 +659,7 @@ check_state_end:
     pop r16
     ret
 
-; Rutina de incremento de día
+; Rutina de incremento de dÃ­a
 increment_day:
     push r16
     push r17
@@ -642,7 +669,7 @@ increment_day:
     lds r16, current_day
     inc r16
     
-    ; Obtener máximo de días para el mes actual
+    ; Obtener mÃ¡ximo de dÃ­as para el mes actual
     lds r17, current_month
     dec r17
     ldi ZL, LOW(2*days_in_month)
@@ -663,7 +690,7 @@ save_inc_day:
     pop r16
     ret
 
-; Rutina de verificación de alarma
+; Rutina de verificaciÃ³n de alarma
 check_alarm_time:
     push r16
     push r17
@@ -695,7 +722,7 @@ check_alarm_end:
     pop r16
     ret
 
-	; Rutinas de actualización de display
+	; Rutinas de actualizaciÃ³n de display
 update_time_display:
     push r16
     push r17
@@ -720,8 +747,8 @@ update_date_display:
     
     lds r16, current_day
     call convert_to_bcd
-    sts display_buffer, r17    ; Decenas del día
-    sts display_buffer+1, r16  ; Unidades del día
+    sts display_buffer, r17    ; Decenas del dÃ­a
+    sts display_buffer+1, r16  ; Unidades del dÃ­a
     
     lds r16, current_month
     call convert_to_bcd
@@ -750,7 +777,7 @@ update_alarm_display:
     pop r16
     ret
 
-; Rutinas de manejo de botones específicos
+; Rutinas de manejo de botones especÃ­ficos
 handle_mode_button:
     push r16
     
@@ -935,7 +962,7 @@ debounce_delay:
     push r17
     push r18
     
-    ldi r16, 50      ; Ajustar según necesidad
+    ldi r16, 50      ; Ajustar segÃºn necesidad
 delay_loop1:
     ldi r17, 255
 delay_loop2:
@@ -953,7 +980,7 @@ delay_loop3:
     pop r16
     ret
 
-; Conversión BCD
+; ConversiÃ³n BCD
 convert_to_bcd:
     push r18
     clr r17                    ; Contador de decenas
@@ -1063,7 +1090,7 @@ save_dec_month:
     pop r16
     ret
 
-; Rutinas de decremento de día
+; Rutinas de decremento de dÃ­a
 decrement_day:
     push r16
     push r17
@@ -1075,7 +1102,7 @@ decrement_day:
     cpi r16, 0
     brne save_dec_day
     
-    ; Cargar último día del mes
+    ; Cargar Ãºltimo dÃ­a del mes
     lds r17, current_month
     dec r17
     ldi ZL, LOW(2*days_in_month)
@@ -1154,14 +1181,14 @@ save_dec_alarm_m:
     pop r16
     ret
 
-; Rutina de validación de día al cambiar mes
+; Rutina de validaciÃ³n de dÃ­a al cambiar mes
 validate_day:
     push r16
     push r17
     push ZL
     push ZH
     
-    ; Verificar que el día actual es válido para el nuevo mes
+    ; Verificar que el dÃ­a actual es vÃ¡lido para el nuevo mes
     lds r16, current_day
     lds r17, current_month
     dec r17
