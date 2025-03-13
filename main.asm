@@ -160,12 +160,28 @@ RESET:
     ori r16, (1<<BTN_MODE)|(1<<BTN_SELECT)|(1<<BTN_INCREMENT)|(1<<BTN_DECREMENT)|(1<<BTN_ALARM_OFF)
     out PORTC, r16
 
+	; Habilitar interrupciones PCINT para PORTC (PCINT8-PCINT14)
+    lds r16, PCICR
+    ori r16, (1<<PCIE1)    ; Habilitar grupo PCINT1 (PORTC)
+    sts PCICR, r16
+    
+    ; Habilitar PCINT para los pines de los botones
+    ldi r16, (1<<PCINT8)|(1<<PCINT9)|(1<<PCINT10)|(1<<PCINT11)|(1<<PCINT12)
+    ; o alternativamente:
+    ; ldi r16, (1<<BTN_MODE)|(1<<BTN_SELECT)|(1<<BTN_INCREMENT)|(1<<BTN_DECREMENT)|(1<<BTN_ALARM_OFF)
+    sts PCMSK1, r16
+    
+    ; Habilitar interrupciones globales
+    sei
+
     ; PORTD - Configurar salidas (segmentos y DISPLAY1)
     ldi r16, 0xFF        ; Todos los pines como salida
     out DDRD, r16
     clr r16
     out PORTD, r16       ; Inicialmente apagados
 
+
+	
     ; Configurar Timer0 para multiplexación (CTC, 4ms)
     ldi r16, (1<<WGM01)  ; Modo CTC
     out TCCR0A, r16
@@ -220,6 +236,9 @@ RESET:
     sts last_button_state, r16
     sts button_debounce_timer, r16
 
+	; Actualizar el display_buffer con la hora inicial
+    rcall update_time_display    ; Esto convertirá 21:32 a BCD y lo guardará en display_buffer
+
     ; Habilitar interrupciones globales
     sei
 
@@ -251,8 +270,28 @@ PCINT1_ISR:
     tst r17
     brne pcint1_end     ; Si el timer no es 0, ignorar
 
- 
-  
+    ; Aquí agregamos el manejo de botones
+    cpi r16, (1<<BTN_MODE)
+    brne not_mode_button
+    jmp handle_mode_button
+not_mode_button:
+    cpi r16, (1<<BTN_SELECT)
+    brne not_select_button
+    jmp handle_select_button
+not_select_button:
+    cpi r16, (1<<BTN_INCREMENT)
+    brne not_increment_button
+    jmp handle_increment_button
+not_increment_button:
+    cpi r16, (1<<BTN_DECREMENT)
+    brne not_decrement_button
+    jmp handle_decrement_button
+not_decrement_button:
+    cpi r16, (1<<BTN_ALARM_OFF)
+    brne buttons_end
+    jmp handle_alarm_off_button
+buttons_end:
+
     ; Iniciar timer de debounce
     ldi r16, 10         ; 10 * 4ms = 40ms debounce
     sts button_debounce_timer, r16
@@ -269,6 +308,7 @@ pcint1_end:
     out SREG, r16
     pop r16
     reti
+
 	
 
 
@@ -430,8 +470,7 @@ timer2_end:
     out SREG, r16
     pop r16
     reti
-
-	multiplex_displays:
+multiplex_displays:
     push r16
     push r17
     push r18
@@ -444,120 +483,45 @@ timer2_end:
     out PORTB, r16
     cbi PORTD, DISPLAY1_PIN
     
-    ; Obtener dígito actual
+    ; TEST: Mostrar números de prueba en todos los displays
     lds r16, current_digit
-
-    ; Verificar si estamos en modo configuración y si el dígito debe parpadear
-    lds r18, estado_actual
-    cpi r18, STATE_SET_HOUR
-    brne check_minute_digit_label
-    jmp check_hour_digit
-
-check_minute_digit_label:
-    cpi r18, STATE_SET_MINUTE
-    brne check_day_digit_label
-    jmp check_minute_digit
-
-check_day_digit_label:
-    cpi r18, STATE_SET_DAY
-    brne check_month_digit_label
-    jmp check_day_digit
-
-check_month_digit_label:
-    cpi r18, STATE_SET_MONTH
-    brne check_alarm_hour_label
-    jmp check_month_digit
-
-check_alarm_hour_label:
-    cpi r18, STATE_SET_ALARM_HOUR
-    brne check_alarm_minute_label
-    jmp check_alarm_hour
-
-check_alarm_minute_label:
-    cpi r18, STATE_SET_ALARM_MINUTE
-    brne show_digit_label
-    jmp check_alarm_minute
-
-show_digit_label:
-    jmp show_digit     ; No estamos en modo configuración
-
-check_hour_digit:
-    cpi r16, 2          ; ¿Es dígito de hora? (0 o 1)
-    brge show_digit     ; Si es >= 2, mostrar normal
-    jmp check_blink    ; Si es 0 o 1, parpadear
-
-check_minute_digit:
-    cpi r16, 2          ; ¿Es dígito de minuto? (2 o 3)
-    brlt show_digit     ; Si es < 2, mostrar normal
-    jmp check_blink    ; Si es 2 o 3, parpadear
-
-check_day_digit:
-    cpi r16, 2          ; ¿Es dígito de día? (0 o 1)
-    brge show_digit     ; Si es >= 2, mostrar normal
-    jmp check_blink    ; Si es 0 o 1, parpadear
-
-check_month_digit:
-    cpi r16, 2          ; ¿Es dígito de mes? (2 o 3)
-    brlt show_digit     ; Si es < 2, mostrar normal
-    jmp check_blink    ; Si es 2 o 3, parpadear
-
-check_alarm_hour:
-    cpi r16, 2          ; ¿Es dígito de hora de alarma? (0 o 1)
-    brge show_digit     ; Si es >= 2, mostrar normal
-    jmp check_blink    ; Si es 0 o 1, parpadear
-
-check_alarm_minute:
-    cpi r16, 2          ; ¿Es dígito de minuto de alarma? (2 o 3)
-    brlt show_digit     ; Si es < 2, mostrar normal
-    jmp check_blink    ; Si es 2 o 3, parpadear
-
-check_blink:
-    lds r18, digit_blink_state
-    sbrc r18, 5         ; Parpadear cada ~250ms
-    jmp skip_digit     ; Si el bit 5 está en 1, no mostrar dígito
-
-show_digit:
-    ; Cargar valor del dígito desde buffer
-    ldi ZL, LOW(display_buffer)
-    ldi ZH, HIGH(display_buffer)
-    add ZL, r16
-    ld r17, Z          ; r17 contiene el número a mostrar (0-9)
+    
+    ; Cargar valor de prueba
+    ldi r17, 1          ; Número de prueba (1-4)
     
     ; Convertir a patrón de segmentos
     ldi ZL, LOW(2*digit_table)
     ldi ZH, HIGH(2*digit_table)
+    lsl r17            ; Multiplicar por 2 porque son words
     add ZL, r17
-    lpm r17, Z         ; r17 ahora contiene el patrón de segmentos
+    brcc no_carry_table
+    inc ZH
+no_carry_table:
+    lpm r17, Z+        ; Cargar patrón de segmentos
     
     ; Mostrar segmentos
     out PORTD, r17
     
-    ; Seleccionar display actual
+    ; Activar display actual
     cpi r16, 0
     brne try_display2
     sbi PORTD, DISPLAY1_PIN
-    jmp next_digit
+    rjmp next_digit
     
 try_display2:
     cpi r16, 1
     brne try_display3
     sbi PORTB, DISPLAY2_PIN
-    jmp next_digit
+    rjmp next_digit
     
 try_display3:
     cpi r16, 2
     brne try_display4
     sbi PORTB, DISPLAY3_PIN
-    jmp next_digit
+    rjmp next_digit
     
 try_display4:
     sbi PORTB, DISPLAY4_PIN
-    jmp next_digit
-
-skip_digit:
-    ; No mostrar nada en este ciclo
-    clr r17
-    out PORTD, r17
     
 next_digit:
     ; Incrementar índice de dígito actual
@@ -780,20 +744,29 @@ update_alarm_display:
 ; Rutinas de manejo de botones específicos
 handle_mode_button:
     push r16
-    
+
     lds r16, estado_actual
     
     cpi r16, STATE_SHOW_TIME
     brne mode_check_1
     ldi r16, STATE_SHOW_DATE
-    jmp save_mode
+    rjmp set_debug_display 
 mode_check_1:
     cpi r16, STATE_SHOW_DATE
     brne mode_check_2
     ldi r16, STATE_SHOW_ALARM
-    jmp save_mode
+    rjmp set_debug_display  
 mode_check_2:
     ldi r16, STATE_SHOW_TIME
+    
+set_debug_display:
+    ; Debug: mostrar "1111" en display_buffer
+    ldi r17, 1
+    sts display_buffer, r17
+    sts display_buffer+1, r17
+    sts display_buffer+2, r17
+    sts display_buffer+3, r17
+    
 save_mode:
     sts estado_actual, r16
     call debounce_delay
@@ -809,50 +782,60 @@ handle_select_button:
     cpi r16, STATE_SHOW_TIME
     brne select_check_1
     ldi r16, STATE_SET_HOUR
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_1:
     cpi r16, STATE_SET_HOUR
     brne select_check_2
     ldi r16, STATE_SET_MINUTE
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_2:
     cpi r16, STATE_SET_MINUTE
     brne select_check_3
     ldi r16, STATE_SHOW_TIME
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_3:
     cpi r16, STATE_SHOW_DATE
     brne select_check_4
     ldi r16, STATE_SET_DAY
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_4:
     cpi r16, STATE_SET_DAY
     brne select_check_5
     ldi r16, STATE_SET_MONTH
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_5:
     cpi r16, STATE_SET_MONTH
     brne select_check_6
     ldi r16, STATE_SHOW_DATE
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_6:
     cpi r16, STATE_SHOW_ALARM
     brne select_check_7
     ldi r16, STATE_SET_ALARM_HOUR
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_7:
     cpi r16, STATE_SET_ALARM_HOUR
     brne select_check_8
     ldi r16, STATE_SET_ALARM_MINUTE
-    jmp save_select
+    rjmp set_debug_display  ; Agregar debug aquí
 select_check_8:
     ldi r16, STATE_SHOW_ALARM
+    
+set_debug_display2:
+    ; Debug: mostrar "2222" en display_buffer
+    ldi r17, 2
+    sts display_buffer, r17
+    sts display_buffer+1, r17
+    sts display_buffer+2, r17
+    sts display_buffer+3, r17
+    
 save_select:
     sts estado_actual, r16
     call debounce_delay
     
     pop r16
     ret
+
 
 handle_increment_button:
     push r16
