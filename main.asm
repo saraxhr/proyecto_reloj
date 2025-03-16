@@ -1,1193 +1,653 @@
-;******************************************************************************
-; Reloj Digital con ATmega 328p
-; Autor: saraxhr 
-; Fecha: 2025-03-04
-; Hora: 20:49:54
-;******************************************************************************
-
 .include "m328pdef.inc"
 
-; Definiciones de pines
-; Segmentos del display (PORTD)
-.equ SEGMENT_A = PD1
-.equ SEGMENT_B = PD0
-.equ SEGMENT_C = PD2
-.equ SEGMENT_D = PD3
-.equ SEGMENT_E = PD4
-.equ SEGMENT_F = PD5
-.equ SEGMENT_G = PD6
+; Definición de registros
+.def temp = r16
+.def display_actual = r17
+.def digit_sel = r18
+.def hora_h = r19
+.def hora_l = r20
+.def min_h = r21
+.def min_l = r22
+.def seg_h = r23
+.def seg_l = r24
+.def debounce_counter = r25 
+.def temp2 = r3         ; Registro temporal adicional
+.def modo = r4          ; 0 = hora, 1 = fecha, 2 = alarma
+.def dia_h = r5         ; Decenas de día
+.def dia_l = r6         ; Unidades de día
+.def mes_h = r7         ; Decenas de mes
+.def mes_l = r8         ; Unidades de mes
+.def led_counter = r13    ; Contador para el parpadeo de LEDs
 
-; Pines de control para multiplexación
-.equ DISPLAY1_PIN = PD7
-.equ DISPLAY2_PIN = PB0
-.equ DISPLAY3_PIN = PB1
-.equ DISPLAY4_PIN = PB2
 
-; LEDs y Buzzer (PORTB)
-.equ LED1_PIN = PB4
-.equ LED2_PIN = PB3
-.equ BUZZER_PIN = PB5
 
-; Botones (PORTC)
-.equ BTN_MODE = PC0
-.equ BTN_SELECT = PC1
-.equ BTN_INCREMENT = PC2
-.equ BTN_DECREMENT = PC3
-.equ BTN_ALARM_OFF = PC4
 
-; Estados de la FSM
-.equ STATE_SHOW_TIME = 0x00
-.equ STATE_SHOW_DATE = 0x10
-.equ STATE_SHOW_ALARM = 0x20
-.equ STATE_SET_HOUR = 0x01
-.equ STATE_SET_MINUTE = 0x02
-.equ STATE_SET_DAY = 0x11
-.equ STATE_SET_MONTH = 0x12
-.equ STATE_SET_ALARM_HOUR = 0x21
-.equ STATE_SET_ALARM_MINUTE = 0x22
-.equ STATE_ALARM_ON = 0xF1
-
-; Vector Table
-.cseg
+; Definición de botones y LEDS
+.equ BUTTON_SEL = PINC1
+.equ BUTTON_INC = PINC2
+.equ BUTTON_DEC = PINC3
+.equ LED1 = 3            ; PB3
+.equ LED2 = 4            ; PB4
+; Vector de interrupciones
 .org 0x0000
-    jmp RESET           ; Reset Handler
-.org INT0addr
-    reti               ; External Interrupt Request 0
-.org INT1addr
-    reti               ; External Interrupt Request 1
-.org PCI0addr
-    reti               ; Pin Change Interrupt Request 0
+    rjmp RESET
 .org PCI1addr
-    jmp PCINT1_ISR     ; Pin Change Interrupt Request 1
-.org PCI2addr
-    reti               ; Pin Change Interrupt Request 2
-.org WDTaddr
-    reti               ; Watchdog Time-out Interrupt
-.org OC2Aaddr
-    reti               ; Timer/Counter2 Compare Match A
-.org OC2Baddr
-    reti               ; Timer/Counter2 Compare Match B
-.org OVF2addr
-    reti               ; Timer/Counter2 Overflow
-.org ICP1addr
-    reti               ; Timer/Counter1 Capture Event
-.org OC1Aaddr
-    jmp TIMER1_COMP    ; Timer/Counter1 Compare Match A
-.org OC1Baddr
-    reti               ; Timer/Counter1 Compare Match B
-.org OVF1addr
-    reti               ; Timer/Counter1 Overflow
-.org OC0Aaddr
-    jmp TIMER0_COMP    ; Timer/Counter0 Compare Match A
-.org OC0Baddr
-    reti               ; Timer/Counter0 Compare Match B
+    rjmp PIN_CHANGE_ISR
 .org OVF0addr
-    reti               ; Timer/Counter0 Overflow
+    rjmp TIMER0_OVF
 
-; Mover el inicio del código a 0x100 para evitar conflictos
-.org 0x100             ; Nueva dirección de inicio para el código
+; Tabla de segmentos (cátodo común)
+tabla_7seg:
+    .db 0b00111111, 0b00000110  ; 0, 1
+    .db 0b01011011, 0b01001111  ; 2, 3
+    .db 0b01100110, 0b01101101  ; 4, 5
+    .db 0b01111101, 0b00000111  ; 6, 7
+    .db 0b01111111, 0b01101111  ; 8, 9
 
-; Tablas de datos
-.cseg
-.org 0x100  ; Asegurar que comienza en una dirección alineada
-digit_table:
-    .dw 0b00111111  ; 0
-    .dw 0b00000110  ; 1
-    .dw 0b01011011  ; 2
-    .dw 0b01001111  ; 3
-    .dw 0b01100110  ; 4
-    .dw 0b01101101  ; 5
-    .dw 0b01111101  ; 6
-    .dw 0b00000111  ; 7
-    .dw 0b01111111  ; 8
-    .dw 0b01101111  ; 9
-
-
-
-days_in_month:         ; Tabla de días por mes
-    .db 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
-
-buzzer_pattern:
-    .db 0xFF, 0x00      ; Patrón simple de encendido/apagado para la alarma
-
-; Variables en SRAM
-.dseg
-.org 0x200            ; Mover las variables más arriba en la SRAM
-current_hours:    .byte 1
-current_minutes:  .byte 1
-current_seconds:  .byte 1
-current_day:      .byte 1
-current_month:    .byte 1
-alarm_hours:      .byte 1
-alarm_minutes:    .byte 1
-alarm_enabled:    .byte 1
-estado_actual:    .byte 1
-display_buffer:   .byte 4
-current_digit:    .byte 1
-timer0_count:     .byte 1
-timer1_count:     .byte 1
-led_state:        .byte 1
-digit_blink_state: .byte 1
-last_button_state: .byte 1
-button_debounce_timer: .byte 1
-
-.cseg
-
-
-RESET:
-    ; Inicialización del stack
-    ldi r16, low(RAMEND)
-    out SPL, r16
-    ldi r16, high(RAMEND)
-    out SPH, r16
+	RESET:
+    ; Stack setup
+    ldi temp, high(RAMEND)
+    out SPH, temp
+    ldi temp, low(RAMEND)
+    out SPL, temp
 
     ; Configuración de puertos
-    ; PORTB - Configurar salidas (displays 2-4, LEDs y buzzer)
-    in r16, DDRB
-    ori r16, (1<<BUZZER_PIN)|(1<<LED1_PIN)|(1<<LED2_PIN)|(1<<DISPLAY2_PIN)|(1<<DISPLAY3_PIN)|(1<<DISPLAY4_PIN)
-    out DDRB, r16
+    ldi temp, 0xFF        ; PORTD como salida
+    out DDRD, temp
+    ldi temp, 0x1F        ; PB0-PB4 como salidas (0b00011111) - Agregado PB3 y PB4 para LEDs
+    out DDRB, temp
+    ldi temp, 0x00        ; PORTC como entrada
+    out DDRC, temp
+    ldi temp, 0x0E        ; Pull-up en PC1-PC3 (0b00001110)
+    out PORTC, temp       ; Activar pull-ups
+
+    ; Inicializar contador de LEDs
+    clr led_counter       ; Agregar esta línea
+
+    ; Inicialización de variables
+    clr display_actual
+    clr digit_sel
+    clr hora_h
+    ldi temp, 1           ; Iniciar en 01:00
+    mov hora_l, temp
+    clr min_h
+    clr min_l
+
+    clr modo            ; Iniciar en modo hora
+    ldi temp, 1
+    mov dia_l, temp     ; Iniciar en día 01
+    clr dia_h
+    ldi temp, 1
+    mov mes_l, temp     ; Iniciar en mes 01
+    clr mes_h
+
+    ; Configuración de PORTC
+    ldi temp, 0x00      ; PORTC como entrada
+    out DDRC, temp
+    ldi temp, 0x0F      ; Pull-up en PC0-PC3 (0b00001111)
+    out PORTC, temp
+
+    ; Configuración Timer0 para multiplexación
+    ldi temp, (1<<CS01)   ; Prescaler 8
+    out TCCR0B, temp
+    ldi temp, (1<<TOIE0)
+    sts TIMSK0, temp
+
+    ; Configuración de interrupciones para botones
+    ldi temp, (1<<PCIE1)  ; Habilitar PCINT para PORTC
+    sts PCICR, temp
+    ldi temp, (1<<PCINT9)|(1<<PCINT10)|(1<<PCINT11)  ; Habilitar pines específicos
+    sts PCMSK1, temp
+
+    sei                   ; Habilitar interrupciones globales
+
+MAIN_LOOP:
+    rjmp MAIN_LOOP
+
+TIMER0_OVF:
+    push temp
+    in temp, SREG
+    push temp
+    push temp2        ; Guardar temp2 (r3)
+
+    ; Verificar si estamos en modo hora antes de cualquier operación con LEDs
+    mov temp, modo
+    cpi temp, 0
+    brne set_leds_by_mode   ; Si no estamos en modo hora, configurar LEDs según modo
+
+    ; Solo manejar parpadeo en modo hora
+    mov temp, led_counter
+    inc temp
+    mov led_counter, temp
+    cpi temp, 250        
+    brne continue_display
+
+    ; Toggle LEDs solo en modo hora
+    clr led_counter
+    in temp, PORTB
+    sbrc temp, 3
+    rjmp toggle_off
     
-    in r16, PORTB
-    andi r16, ~((1<<BUZZER_PIN)|(1<<LED1_PIN)|(1<<LED2_PIN)|(1<<DISPLAY2_PIN)|(1<<DISPLAY3_PIN)|(1<<DISPLAY4_PIN))
-    out PORTB, r16
+toggle_on:
+    sbi PORTB, 3
+    sbi PORTB, 4
+    rjmp continue_display
 
-    ; PORTC - Configurar entradas con pull-up (botones)
-    in r16, DDRC
-    andi r16, ~((1<<BTN_MODE)|(1<<BTN_SELECT)|(1<<BTN_INCREMENT)|(1<<BTN_DECREMENT)|(1<<BTN_ALARM_OFF))
-    out DDRC, r16
+toggle_off:
+    cbi PORTB, 3
+    cbi PORTB, 4
+    rjmp continue_display
+
+set_leds_by_mode:
+    cpi temp, 1          ; ¿Es modo fecha?
+    breq set_fecha_leds_timer    ; Si es modo fecha, ir a set_fecha_leds_timer
     
-    in r16, PORTC
-    ori r16, (1<<BTN_MODE)|(1<<BTN_SELECT)|(1<<BTN_INCREMENT)|(1<<BTN_DECREMENT)|(1<<BTN_ALARM_OFF)
-    out PORTC, r16
+    ; Si llegamos aquí, es modo alarma
+    cbi PORTB, 3       ; Apagar ambos LEDs para modo alarma
+    cbi PORTB, 4
+    rjmp continue_display
 
-	; Habilitar interrupciones PCINT para PORTC (PCINT8-PCINT14)
-    lds r16, PCICR
-    ori r16, (1<<PCIE1)    ; Habilitar grupo PCINT1 (PORTC)
-    sts PCICR, r16
+set_fecha_leds_timer:    
+    ; Modo fecha - LEDs siempre encendidos
+    sbi PORTB, 3
+    sbi PORTB, 4
+    rjmp continue_display
+
+set_alarma_leds_timer:
+    ; Modo alarma - LEDs siempre apagados
+    cbi PORTB, 3
+    cbi PORTB, 4
+
+continue_display:
+    ; Apagar displays manteniendo estado de LEDs
+    in temp, PORTB
+    andi temp, (1<<3)|(1<<4)    ; Mantener solo los bits de LEDs (PB3 y PB4)
+    mov temp2, temp             ; Guardar estado de LEDs
     
-    ; Habilitar PCINT para los pines de los botones
-    ldi r16, (1<<PCINT8)|(1<<PCINT9)|(1<<PCINT10)|(1<<PCINT11)|(1<<PCINT12)
-    ; o alternativamente:
-    ; ldi r16, (1<<BTN_MODE)|(1<<BTN_SELECT)|(1<<BTN_INCREMENT)|(1<<BTN_DECREMENT)|(1<<BTN_ALARM_OFF)
-    sts PCMSK1, r16
+    ldi temp, 0x00             ; Limpiar displays
+    out PORTB, temp
+    out PORTD, temp
     
-    ; Habilitar interrupciones globales
-    sei
+    ; Restaurar estado de LEDs
+    in temp, PORTB
+    or temp, temp2             ; Combinar con estado guardado de LEDs
+    out PORTB, temp
 
-    ; PORTD - Configurar salidas (segmentos y DISPLAY1)
-    ldi r16, 0xFF        ; Todos los pines como salida
-    out DDRD, r16
-    clr r16
-    out PORTD, r16       ; Inicialmente apagados
+    ; Rotar al siguiente display
+    inc display_actual
+    andi display_actual, 0x03
 
+    ; Verificar modo actual
+    mov temp, modo
+    cpi temp, 0
+    breq show_hora_modo
+    cpi temp, 1
+    breq show_fecha_modo
+    rjmp show_alarma_modo
 
-	
-    ; Configurar Timer0 para multiplexación (CTC, 4ms)
-    ldi r16, (1<<WGM01)  ; Modo CTC
-    out TCCR0A, r16
-    ldi r16, (1<<CS01)|(1<<CS00)  ; Prescaler 64
-    out TCCR0B, r16
-    ldi r16, 249         ; Para 4ms con prescaler 64
-    out OCR0A, r16
-    ldi r16, (1<<OCIE0A) ; Habilitar interrupción Compare Match A
-    sts TIMSK0, r16
+show_hora_modo:
+    mov temp, display_actual
+    cpi temp, 0
+    breq show_hora_h
+    cpi temp, 1
+    breq show_hora_l
+    cpi temp, 2
+    breq show_min_h
+    rjmp show_min_l
 
-    ; Configurar Timer1 para base de tiempo (CTC, 500ms)
-    ldi r16, (1<<WGM12)  ; Modo CTC
-    sts TCCR1B, r16
-    ldi r16, (1<<CS12)|(1<<CS10)  ; Prescaler 1024
-    sts TCCR1B, r16
-    ldi r16, high(7812)  ; Para 500ms con prescaler 1024
-    sts OCR1AH, r16
-    ldi r16, low(7812)
-    sts OCR1AL, r16
-    ldi r16, (1<<OCIE1A) ; Habilitar interrupción Compare Match A
-    sts TIMSK1, r16
+show_fecha_modo:
+    mov temp, display_actual
+    cpi temp, 0
+    breq show_dia_h
+    cpi temp, 1
+    breq show_dia_l
+    cpi temp, 2
+    breq show_mes_h
+    rjmp show_mes_l
 
-    ; Configurar Pin Change Interrupt para PORTC
-    ldi r16, (1<<PCIE1)  ; Habilitar PCINT[14:8] para PORTC
-    sts PCICR, r16
-    ldi r16, 0x1F        ; Habilitar PCINT[12:8] para PC[4:0]
-    sts PCMSK1, r16
+show_alarma_modo:
+    mov temp, display_actual
+    cpi temp, 0
+    breq show_hora_h
+    cpi temp, 1
+    breq show_hora_l
+    cpi temp, 2
+    breq show_min_h
+    rjmp show_min_l
 
-    ; Inicializar variables
-    ldi r16, 21          ; Hora inicial: 21:32:57
-    sts current_hours, r16
-    ldi r16, 32
-    sts current_minutes, r16
-    ldi r16, 57
-    sts current_seconds, r16
-    
-    ldi r16, 4           ; Fecha inicial: 4 de marzo
-    sts current_day, r16
-    ldi r16, 3
-    sts current_month, r16
+show_dia_h:
+    mov temp, dia_h
+    rcall mostrar_digito
+    sbi PORTD, 7
+    rjmp end_timer0
 
-    clr r16
-    sts alarm_hours, r16
-    sts alarm_minutes, r16
-    sts alarm_enabled, r16
-    sts estado_actual, r16
-    sts current_digit, r16
-    sts timer0_count, r16
-    sts timer1_count, r16
-    sts led_state, r16
-    sts digit_blink_state, r16
-    sts last_button_state, r16
-    sts button_debounce_timer, r16
+show_dia_l:
+    mov temp, dia_l
+    rcall mostrar_digito
+    sbi PORTB, 0
+    rjmp end_timer0
 
-	; Actualizar el display_buffer con la hora inicial
-    rcall update_time_display    ; Esto convertirá 21:32 a BCD y lo guardará en display_buffer
+show_mes_h:
+    mov temp, mes_h
+    rcall mostrar_digito
+    sbi PORTB, 1
+    rjmp end_timer0
 
-    ; Habilitar interrupciones globales
-    sei
+show_mes_l:
+    mov temp, mes_l
+    rcall mostrar_digito
+    sbi PORTB, 2
+    rjmp end_timer0
 
-main_loop:
-    call read_buttons
-    call check_state
-    jmp main_loop
+show_hora_h:
+    mov temp, hora_h
+    rcall mostrar_digito
+    sbi PORTD, 7
+    rjmp end_timer0
 
-PCINT1_ISR:
-    push r16
-    in r16, SREG
-    push r16
-    push r17
-    push r18
+show_hora_l:
+    mov temp, hora_l
+    rcall mostrar_digito
+    sbi PORTB, 0
+    rjmp end_timer0
 
-    ; Leer estado actual de botones
-    in r16, PINC
-    com r16              ; Invertir porque son pull-up
-    andi r16, 0x1F      ; Mantener solo los 5 bits de botones
+show_min_h:
+    mov temp, min_h
+    rcall mostrar_digito
+    sbi PORTB, 1
+    rjmp end_timer0
 
-    ; Comparar con estado anterior
-    lds r17, last_button_state
-    mov r18, r16
-    eor r18, r17        ; r18 tendrá los bits que cambiaron
-    and r16, r18        ; r16 tendrá solo los botones que se presionaron
+show_min_l:
+    mov temp, min_l
+    rcall mostrar_digito
+    sbi PORTB, 2
+    rjmp end_timer0
 
-    ; Verificar debounce timer
-    lds r17, button_debounce_timer
-    tst r17
-    brne pcint1_end     ; Si el timer no es 0, ignorar
-
-    ; Aquí agregamos el manejo de botones
-    cpi r16, (1<<BTN_MODE)
-    brne not_mode_button
-    jmp handle_mode_button
-not_mode_button:
-    cpi r16, (1<<BTN_SELECT)
-    brne not_select_button
-    jmp handle_select_button
-not_select_button:
-    cpi r16, (1<<BTN_INCREMENT)
-    brne not_increment_button
-    jmp handle_increment_button
-not_increment_button:
-    cpi r16, (1<<BTN_DECREMENT)
-    brne not_decrement_button
-    jmp handle_decrement_button
-not_decrement_button:
-    cpi r16, (1<<BTN_ALARM_OFF)
-    brne buttons_end
-    jmp handle_alarm_off_button
-buttons_end:
-
-    ; Iniciar timer de debounce
-    ldi r16, 10         ; 10 * 4ms = 40ms debounce
-    sts button_debounce_timer, r16
-
-pcint1_end:
-    in r16, PINC
-    com r16
-    andi r16, 0x1F
-    sts last_button_state, r16
-
-    pop r18
-    pop r17
-    pop r16
-    out SREG, r16
-    pop r16
+end_timer0:
+    pop temp2           ; Restaurar temp2
+    pop temp
+    out SREG, temp
+    pop temp
     reti
 
-	
-
-
-; Rutinas de interrupción de timers
-TIMER0_COMP:
-    push r16
-    in r16, SREG
-    push r16
-    push r17
-    push r18
-    
-    ; Decrementar timer de debounce si no es 0
-    lds r16, button_debounce_timer
-    tst r16
-    breq skip_debounce
-    dec r16
-    sts button_debounce_timer, r16
-skip_debounce:
-
-    ; Manejar parpadeo en modo configuración
-    lds r16, estado_actual
-    cpi r16, STATE_SHOW_TIME
-    breq no_blink
-    cpi r16, STATE_SHOW_DATE
-    breq no_blink
-    cpi r16, STATE_SHOW_ALARM
-    breq no_blink
-    
-    ; En modo configuración, toggle estado de parpadeo cada 250ms
-    lds r16, digit_blink_state
-    inc r16
-    cpi r16, 63         ; ~250ms
-    brne save_blink
-    clr r16
-save_blink:
-    sts digit_blink_state, r16
-    
-no_blink:
-    ; Multiplexación de displays
-    call multiplex_displays
-    
-    ; Contador de multiplexación
-    lds r16, timer0_count
-    inc r16
-    cpi r16, 250       ; 250 * 4ms = 1s
-    brne save_timer0
-    clr r16
-    
-save_timer0:
-    sts timer0_count, r16
-    
-    pop r18
-    pop r17
-    pop r16
-    out SREG, r16
-    pop r16
-    reti
-
-TIMER1_COMP:
-    push r16
-    in r16, SREG
-    push r16
-    push r17
-    
-    ; Contador para LED (ahora más lento)
-    lds r16, timer1_count
-    inc r16
-    cpi r16, 5        ; Aumentado a 5 para un parpadeo más lento
-    brne save_timer1
-    clr r16
-    
-    ; Toggle estado de LEDs con encendido/apagado más definido
-    lds r17, led_state
-    com r17
-    sts led_state, r17
-    
-    ; Actualizar LEDs - Asegurar que se encienden/apagan completamente
-    in r17, PORTB     ; Leer estado actual de PORTB
-    andi r17, ~((1<<LED1_PIN)|(1<<LED2_PIN))  ; Limpiar bits de LED
-    
-    lds r16, led_state
-    sbrc r16, 0
-    ori r17, (1<<LED1_PIN)|(1<<LED2_PIN)    ; Encender ambos LEDs
-    
-    out PORTB, r17    ; Actualizar PORTB
-    
-save_timer1:
-    sts timer1_count, r16
-    
-    ; Incrementar segundos
-    lds r16, current_seconds
-    inc r16
-    cpi r16, 60
-    brne save_seconds
-    
-    ; Si llegamos a 60 segundos, incrementar minutos
-    clr r16
-    sts current_seconds, r16
-    
-    lds r16, current_minutes
-    inc r16
-    cpi r16, 60
-    brne save_minutes
-    
-    ; Si llegamos a 60 minutos, incrementar horas
-    clr r16
-    sts current_minutes, r16
-    
-    lds r16, current_hours
-    inc r16
-    cpi r16, 24
-    brne save_hours
-    
-    ; Si llegamos a 24 horas, incrementar día
-    clr r16
-    sts current_hours, r16
-    call increment_day
-    jmp timer1_end
-    
-save_hours:
-    sts current_hours, r16
-    jmp timer1_end
-    
-save_minutes:
-    sts current_minutes, r16
-    jmp timer1_end
-    
-save_seconds:
-    sts current_seconds, r16
-    
-timer1_end:
-    call check_alarm_time
-    
-    pop r17
-    pop r16
-    out SREG, r16
-    pop r16
-    reti
-
-TIMER2_COMP:
-    push r16
-    in r16, SREG
-    push r16
-    push r17
-    
-    lds r16, estado_actual
-    cpi r16, STATE_ALARM_ON
-    brne timer2_end
-    
-    ; Toggle buzzer pin para generar tono
-    in r16, PINB
-    ldi r17, (1<<BUZZER_PIN)
-    eor r16, r17
-    out PORTB, r16
-    
-timer2_end:
-    pop r17
-    pop r16
-    out SREG, r16
-    pop r16
-    reti
-multiplex_displays:
-    push r16
-    push r17
-    push r18
-    push ZL
+mostrar_digito:
     push ZH
+    push ZL
     
-    ; Apagar todos los displays primero
-    in r16, PORTB
-    andi r16, ~((1<<DISPLAY2_PIN)|(1<<DISPLAY3_PIN)|(1<<DISPLAY4_PIN))
-    out PORTB, r16
-    cbi PORTD, DISPLAY1_PIN
+    ldi ZH, high(tabla_7seg * 2)
+    ldi ZL, low(tabla_7seg * 2)
+    add ZL, temp
+    lpm temp, Z
+    out PORTD, temp
     
-    ; TEST: Mostrar números de prueba en todos los displays
-    lds r16, current_digit
-    
-    ; Cargar valor de prueba
-    ldi r17, 1          ; Número de prueba (1-4)
-    
-    ; Convertir a patrón de segmentos
-    ldi ZL, LOW(2*digit_table)
-    ldi ZH, HIGH(2*digit_table)
-    lsl r17            ; Multiplicar por 2 porque son words
-    add ZL, r17
-    brcc no_carry_table
-    inc ZH
-no_carry_table:
-    lpm r17, Z+        ; Cargar patrón de segmentos
-    
-    ; Mostrar segmentos
-    out PORTD, r17
-    
-    ; Activar display actual
-    cpi r16, 0
-    brne try_display2
-    sbi PORTD, DISPLAY1_PIN
-    rjmp next_digit
-    
-try_display2:
-    cpi r16, 1
-    brne try_display3
-    sbi PORTB, DISPLAY2_PIN
-    rjmp next_digit
-    
-try_display3:
-    cpi r16, 2
-    brne try_display4
-    sbi PORTB, DISPLAY3_PIN
-    rjmp next_digit
-    
-try_display4:
-    sbi PORTB, DISPLAY4_PIN
-    
-next_digit:
-    ; Incrementar índice de dígito actual
-    inc r16
-    cpi r16, 4
-    brne save_digit
-    clr r16
-    
-save_digit:
-    sts current_digit, r16
-    
-    pop ZH
     pop ZL
-    pop r18
-    pop r17
-    pop r16
-    ret
-    
-  
-
-; Rutina de manejo de botones
-read_buttons:
-    push r16
-    push r17
-    
-    in r16, PINC              ; Leer estado de botones
-    com r16                   ; Invertir bits (pull-up)
-    andi r16, 0x1F           ; Mantener solo los 5 bits de botones
-    
-    breq read_buttons_end     ; Si no hay botones presionados, salir
-    
-    sbrc r16, BTN_MODE
-    call handle_mode_button
-    
-    sbrc r16, BTN_SELECT
-    call handle_select_button
-    
-    sbrc r16, BTN_INCREMENT
-    call handle_increment_button
-    
-    sbrc r16, BTN_DECREMENT
-    call handle_decrement_button
-    
-    sbrc r16, BTN_ALARM_OFF
-    call handle_alarm_off_button
-    
-read_buttons_end:
-    pop r17
-    pop r16
+    pop ZH
     ret
 
-; Rutina de verificación de estado
-check_state:
-    push r16
-    
-    lds r16, estado_actual
-    
-    cpi r16, STATE_SHOW_TIME
-    breq show_time_state
-    cpi r16, STATE_SHOW_DATE
-    breq show_date_state
-    cpi r16, STATE_SHOW_ALARM
-    breq show_alarm_state
-    cpi r16, STATE_ALARM_ON
-    breq alarm_on_state
-    
-    ; Estados de configuración
-    cpi r16, STATE_SET_HOUR
-    breq show_time_state
-    cpi r16, STATE_SET_MINUTE
-    breq show_time_state
-    cpi r16, STATE_SET_DAY
-    breq show_date_state
-    cpi r16, STATE_SET_MONTH
-    breq show_date_state
-    cpi r16, STATE_SET_ALARM_HOUR
-    breq show_alarm_state
-    cpi r16, STATE_SET_ALARM_MINUTE
-    breq show_alarm_state
-    
-    jmp check_state_end
+PIN_CHANGE_ISR:
+    push temp
+    in temp, SREG
+    push temp
 
-show_time_state:
-    call update_time_display
-    jmp check_state_end
+    ; Antirrebote
+    ldi debounce_counter, 255
+outer_delay:
+    ldi temp, 255
+inner_delay:
+    dec temp
+    brne inner_delay
+    dec debounce_counter
+    brne outer_delay
+
+    ; Leer estado actual de los botones
+    in temp, PINC
     
-show_date_state:
-    call update_date_display
-    jmp check_state_end
+    ; Verificar botón de modo (PC0)
+    sbrs temp, PINC0
+    rcall cambiar_modo
     
-show_alarm_state:
-    call update_alarm_display
-    jmp check_state_end
+    ; Verificar otros botones
+    sbrs temp, BUTTON_SEL
+    rcall cambiar_digito
     
-alarm_on_state:
-    call update_time_display
+    sbrs temp, BUTTON_INC
+    rcall incrementar_digito
     
-check_state_end:
-    pop r16
+    sbrs temp, BUTTON_DEC
+    rcall decrementar_digito
+
+    ; Esperar a que se suelten los botones
+wait_release:
+    in temp, PINC
+    andi temp, 0x0F     ; Máscara para PC0-PC3
+    cpi temp, 0x0F      ; Verificar si todos los botones están liberados
+    brne wait_release
+
+    pop temp
+    out SREG, temp
+    pop temp
+    reti
+	cambiar_digito:
+    push temp
+    
+    mov temp, modo      ; Cargar el modo actual
+    cpi temp, 0        ; ¿Es modo hora?
+    brne check_fecha_sel
+    
+    ; Modo hora
+    inc digit_sel      ; Incrementar selección
+    cpi digit_sel, 4   ; ¿Llegó a 4?
+    brne exit_sel      ; Si no, salir
+    clr digit_sel      ; Si sí, volver a 0
+    rjmp exit_sel
+
+check_fecha_sel:
+    cpi temp, 1        ; ¿Es modo fecha?
+    brne check_alarma_sel
+    
+    ; Modo fecha
+    inc digit_sel      ; Incrementar selección
+    cpi digit_sel, 4   ; ¿Llegó a 4?
+    brne exit_sel      ; Si no, salir
+    clr digit_sel      ; Si sí, volver a 0
+    rjmp exit_sel
+
+check_alarma_sel:
+    ; Modo alarma (por ahora igual que hora)
+    inc digit_sel      ; Incrementar selección
+    cpi digit_sel, 4   ; ¿Llegó a 4?
+    brne exit_sel      ; Si no, salir
+    clr digit_sel      ; Si sí, volver a 0
+
+exit_sel:
+    pop temp
     ret
 
-; Rutina de incremento de día
-increment_day:
-    push r16
-    push r17
-    push ZL
-    push ZH
+
+cambiar_modo:
+    push temp           
+
+    ; Cambiar modo de manera simple (0->1->2->0)
+    mov temp, modo      
+    inc temp           
+    cpi temp, 3        
+    brne save_new_modo     
+    clr temp           
+
+save_new_modo:
+    mov modo, temp      ; Guardar nuevo modo
     
-    lds r16, current_day
-    inc r16
+    ; Configurar LEDs directamente según el modo
+    cpi temp, 0        ; Verificar modo
+    breq set_hora_leds
+    cpi temp, 1
+    breq set_fecha_leds
+    rjmp set_alarma_leds
+
+set_hora_leds:
+    sbi PORTB, 3       ; Encender ambos LEDs para modo hora
+    sbi PORTB, 4
+    clr led_counter    ; Resetear contador para parpadeo
+    rjmp end_modo
+
+set_fecha_leds:
+    sbi PORTB, 3       ; Encender ambos LEDs para modo fecha
+    sbi PORTB, 4
+    rjmp end_modo
+
+set_alarma_leds:
+    cbi PORTB, 3       ; Apagar ambos LEDs para modo alarma
+    cbi PORTB, 4
+
+end_modo:
+    pop temp           
+    ret
+
+; Rutinas de incremento
+
+incrementar_digito:
+    push temp
+    mov temp, modo
+    cpi temp, 0
+    brne check_fecha     ; Si no es modo hora, verificar si es modo fecha
     
-    ; Obtener máximo de días para el mes actual
-    lds r17, current_month
-    dec r17
-    ldi ZL, LOW(2*days_in_month)
-    ldi ZH, HIGH(2*days_in_month)
-    add ZL, r17
-    lpm r17, Z
+    ; Modo hora (modo = 0)
+    pop temp
+    push temp
+    mov temp, digit_sel
     
-    cp r16, r17
-    brlo save_inc_day
+    cpi temp, 0
+    breq inc_hora_h
+    cpi temp, 1
+    breq inc_hora_l
+    cpi temp, 2
+    breq inc_min_h
+    cpi temp, 3
+    breq inc_min_l
+    rjmp inc_exit
+
+check_fecha:
+    cpi temp, 1
+    brne inc_exit      ; Si no es modo fecha, salir (por ahora ignoramos modo alarma)
+    
+    ; Modo fecha (modo = 1)
+    pop temp
+    push temp
+    mov temp, digit_sel
+    
+    cpi temp, 0
+    breq inc_dia_h
+    cpi temp, 1
+    breq inc_dia_l
+    cpi temp, 2
+    breq inc_mes_h
+    cpi temp, 3
+    breq inc_mes_l
+    rjmp inc_exit
+
+inc_hora_h:
+    inc hora_h
+    cpi hora_h, 3
+    brne exit_inc_h
+    clr hora_h
+exit_inc_h:
+    pop temp
+    ret
+
+inc_hora_l:              ; PB0 - debe contar de 0 a 9
+    inc hora_l
+    cpi hora_l, 10      ; Comprobar si llegó a 10
+    brne no_reset_hora_l
+    clr hora_l          ; Si llegó a 10, volver a 0
+no_reset_hora_l:
+    pop temp
+    ret
+
+inc_min_h:
+    inc min_h
+    cpi min_h, 6
+    brne exit_inc_mh
+    clr min_h
+exit_inc_mh:
+    pop temp
+    ret
+
+inc_min_l:              ; PB2 - debe contar de 0 a 9
+    inc min_l
+    cpi min_l, 10      ; Comprobar si llegó a 10
+    brne no_reset_min_l
+    clr min_l          ; Si llegó a 10, volver a 0
+no_reset_min_l:
+    pop temp
+    ret
+
+inc_dia_h:
+    inc dia_h
+    rcall verificar_dia
+    rjmp inc_exit
+
+inc_dia_l:
+    inc dia_l
+    rcall verificar_dia
+    rjmp inc_exit
+
+inc_mes_h:
+    inc mes_h
+    rcall verificar_mes
+    rjmp inc_exit
+
+inc_mes_l:
+    inc mes_l
+    rcall verificar_mes
+    rjmp inc_exit
+
+inc_exit:
+    pop temp
+    ret
+
+decrementar_digito:
+    push temp
+    mov temp, digit_sel
+    
+    cpi temp, 0
+    brne check_dec_1
+    rjmp dec_hora_h
+    
+check_dec_1:
+    cpi temp, 1
+    brne check_dec_2
+    rjmp dec_hora_l
+    
+check_dec_2:
+    cpi temp, 2
+    brne check_dec_3
+    rjmp dec_min_h
+    
+check_dec_3:
+    cpi temp, 3
+    brne dec_exit
+    rjmp dec_min_l
+    
+dec_exit:
+    pop temp
+    ret
+
+dec_hora_h:
+    dec hora_h
+    brpl exit_dec_h
+    ldi hora_h, 2
+exit_dec_h:
+    pop temp
+    ret
+
+dec_hora_l:             ; PB0 - debe contar de 9 a 0
+    dec hora_l
+    brpl exit_dec_l     ; Si es positivo, mantener el valor
+    ldi hora_l, 9      ; Si es negativo, volver a 9
+exit_dec_l:
+    pop temp
+    ret
+
+dec_min_h:
+    dec min_h
+    brpl exit_dec_mh
+    ldi min_h, 5
+exit_dec_mh:
+    pop temp
+    ret
+
+dec_min_l:             ; PB2 - debe contar de 9 a 0
+    dec min_l
+    brpl exit_dec_ml   ; Si es positivo, mantener el valor
+    ldi min_l, 9      ; Si es negativo, volver a 9
+exit_dec_ml:
+    pop temp
+    ret
+
+	verificar_dia:
+    push r16        ; Usar r16 en lugar de temp
+    push r17        ; Usar r17 en lugar de temp2
+    
+    ; Combinar mes_h y mes_l en un solo número
+    mov r16, mes_h
+    lsl r16         ; Multiplicar por 10
+    lsl r16
+    lsl r16
+    add r16, mes_h
+    lsl r16
+    add r16, mes_l  ; r16 ahora tiene el número de mes (1-12)
+    
+    ; Combinar dia_h y dia_l
+    mov r17, dia_h
+    lsl r17         ; Multiplicar por 10
+    lsl r17
+    lsl r17
+    add r17, dia_h
+    lsl r17
+    add r17, dia_l  ; r17 ahora tiene el número de día
+
+    ; Verificar el mes
+    cpi r16, 2      ; Febrero
+    breq check_feb
+    cpi r16, 4      ; Abril
+    breq check_30
+    cpi r16, 6      ; Junio
+    breq check_30
+    cpi r16, 9      ; Septiembre
+    breq check_30
+    cpi r16, 11     ; Noviembre
+    breq check_30
+    
+    ; Meses de 31 días
+    cpi r17, 32
+    brlo exit_verify
+    ldi r16, 0
+    mov dia_h, r16
     ldi r16, 1
-    
-save_inc_day:
-    sts current_day, r16
-    
-    pop ZH
-    pop ZL
+    mov dia_l, r16
+    rjmp exit_verify
+
+check_30:
+    cpi r17, 31
+    brlo exit_verify
+    ldi r16, 0
+    mov dia_h, r16
+    ldi r16, 1
+    mov dia_l, r16
+    rjmp exit_verify
+
+check_feb:
+    cpi r17, 29
+    brlo exit_verify
+    ldi r16, 0
+    mov dia_h, r16
+    ldi r16, 1
+    mov dia_l, r16
+
+exit_verify:
     pop r17
     pop r16
     ret
 
-; Rutina de verificación de alarma
-check_alarm_time:
-    push r16
-    push r17
-    
-    lds r16, alarm_enabled
-    cpi r16, 0
-    breq check_alarm_end
-    
-    lds r16, current_hours
-    lds r17, alarm_hours
-    cp r16, r17
-    brne check_alarm_end
-    
-    lds r16, current_minutes
-    lds r17, alarm_minutes
-    cp r16, r17
-    brne check_alarm_end
-    
-    lds r16, current_seconds
-    cpi r16, 0
-    brne check_alarm_end
-    
-    ; Activar alarma
-    ldi r16, STATE_ALARM_ON
-    sts estado_actual, r16
-    
-check_alarm_end:
-    pop r17
-    pop r16
-    ret
-
-	; Rutinas de actualización de display
-update_time_display:
-    push r16
-    push r17
-    
-    lds r16, current_hours
-    call convert_to_bcd
-    sts display_buffer, r17    ; Decenas de hora
-    sts display_buffer+1, r16  ; Unidades de hora
-    
-    lds r16, current_minutes
-    call convert_to_bcd
-    sts display_buffer+2, r17  ; Decenas de minutos
-    sts display_buffer+3, r16  ; Unidades de minutos
-    
-    pop r17
-    pop r16
-    ret
-
-update_date_display:
-    push r16
-    push r17
-    
-    lds r16, current_day
-    call convert_to_bcd
-    sts display_buffer, r17    ; Decenas del día
-    sts display_buffer+1, r16  ; Unidades del día
-    
-    lds r16, current_month
-    call convert_to_bcd
-    sts display_buffer+2, r17  ; Decenas del mes
-    sts display_buffer+3, r16  ; Unidades del mes
-    
-    pop r17
-    pop r16
-    ret
-
-update_alarm_display:
-    push r16
-    push r17
-    
-    lds r16, alarm_hours
-    call convert_to_bcd
-    sts display_buffer, r17    ; Decenas de hora alarma
-    sts display_buffer+1, r16  ; Unidades de hora alarma
-    
-    lds r16, alarm_minutes
-    call convert_to_bcd
-    sts display_buffer+2, r17  ; Decenas de minutos alarma
-    sts display_buffer+3, r16  ; Unidades de minutos alarma
-    
-    pop r17
-    pop r16
-    ret
-
-; Rutinas de manejo de botones específicos
-handle_mode_button:
-    push r16
-
-    lds r16, estado_actual
-    
-    cpi r16, STATE_SHOW_TIME
-    brne mode_check_1
-    ldi r16, STATE_SHOW_DATE
-    rjmp set_debug_display 
-mode_check_1:
-    cpi r16, STATE_SHOW_DATE
-    brne mode_check_2
-    ldi r16, STATE_SHOW_ALARM
-    rjmp set_debug_display  
-mode_check_2:
-    ldi r16, STATE_SHOW_TIME
-    
-set_debug_display:
-    ; Debug: mostrar "1111" en display_buffer
-    ldi r17, 1
-    sts display_buffer, r17
-    sts display_buffer+1, r17
-    sts display_buffer+2, r17
-    sts display_buffer+3, r17
-    
-save_mode:
-    sts estado_actual, r16
-    call debounce_delay
-    
-    pop r16
-    ret
-
-handle_select_button:
+verificar_mes:
     push r16
     
-    lds r16, estado_actual
-    
-    cpi r16, STATE_SHOW_TIME
-    brne select_check_1
-    ldi r16, STATE_SET_HOUR
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_1:
-    cpi r16, STATE_SET_HOUR
-    brne select_check_2
-    ldi r16, STATE_SET_MINUTE
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_2:
-    cpi r16, STATE_SET_MINUTE
-    brne select_check_3
-    ldi r16, STATE_SHOW_TIME
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_3:
-    cpi r16, STATE_SHOW_DATE
-    brne select_check_4
-    ldi r16, STATE_SET_DAY
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_4:
-    cpi r16, STATE_SET_DAY
-    brne select_check_5
-    ldi r16, STATE_SET_MONTH
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_5:
-    cpi r16, STATE_SET_MONTH
-    brne select_check_6
-    ldi r16, STATE_SHOW_DATE
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_6:
-    cpi r16, STATE_SHOW_ALARM
-    brne select_check_7
-    ldi r16, STATE_SET_ALARM_HOUR
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_7:
-    cpi r16, STATE_SET_ALARM_HOUR
-    brne select_check_8
-    ldi r16, STATE_SET_ALARM_MINUTE
-    rjmp set_debug_display  ; Agregar debug aquí
-select_check_8:
-    ldi r16, STATE_SHOW_ALARM
-    
-set_debug_display2:
-    ; Debug: mostrar "2222" en display_buffer
-    ldi r17, 2
-    sts display_buffer, r17
-    sts display_buffer+1, r17
-    sts display_buffer+2, r17
-    sts display_buffer+3, r17
-    
-save_select:
-    sts estado_actual, r16
-    call debounce_delay
-    
-    pop r16
-    ret
+    ; Combinar mes_h y mes_l
+    mov r16, mes_h
+    lsl r16
+    lsl r16
+    lsl r16
+    add r16, mes_h
+    lsl r16
+    add r16, mes_l
 
-
-handle_increment_button:
-    push r16
-    
-    lds r16, estado_actual
-    
-    cpi r16, STATE_SET_HOUR
-    brne inc_check_1
-    call increment_hour
-    jmp inc_end
-inc_check_1:
-    cpi r16, STATE_SET_MINUTE
-    brne inc_check_2
-    call increment_minute
-    jmp inc_end
-inc_check_2:
-    cpi r16, STATE_SET_DAY
-    brne inc_check_3
-    call increment_day
-    jmp inc_end
-inc_check_3:
-    cpi r16, STATE_SET_MONTH
-    brne inc_check_4
-    call increment_month
-    jmp inc_end
-inc_check_4:
-    cpi r16, STATE_SET_ALARM_HOUR
-    brne inc_check_5
-    call increment_alarm_hour
-    jmp inc_end
-inc_check_5:
-    cpi r16, STATE_SET_ALARM_MINUTE
-    brne inc_end
-    call increment_alarm_minute
-inc_end:
-    call debounce_delay
-    pop r16
-    ret
-
-handle_decrement_button:
-    push r16
-    
-    lds r16, estado_actual
-    
-    cpi r16, STATE_SET_HOUR
-    brne dec_check_1
-    call decrement_hour
-    jmp dec_end
-dec_check_1:
-    cpi r16, STATE_SET_MINUTE
-    brne dec_check_2
-    call decrement_minute
-    jmp dec_end
-dec_check_2:
-    cpi r16, STATE_SET_DAY
-    brne dec_check_3
-    call decrement_day
-    jmp dec_end
-dec_check_3:
-    cpi r16, STATE_SET_MONTH
-    brne dec_check_4
-    call decrement_month
-    jmp dec_end
-dec_check_4:
-    cpi r16, STATE_SET_ALARM_HOUR
-    brne dec_check_5
-    call decrement_alarm_hour
-    jmp dec_end
-dec_check_5:
-    cpi r16, STATE_SET_ALARM_MINUTE
-    brne dec_end
-    call decrement_alarm_minute
-dec_end:
-    call debounce_delay
-    pop r16
-    ret
-
-handle_alarm_off_button:
-    push r16
-    
-    lds r16, estado_actual
-    cpi r16, STATE_ALARM_ON
-    brne toggle_alarm
-    
-    ; Apagar alarma activa
-    ldi r16, STATE_SHOW_TIME
-    sts estado_actual, r16
-    clr r16
-    sts buzzer_pattern, r16
-    cbi PORTB, BUZZER_PIN
-    jmp alarm_off_end
-    
-toggle_alarm:
-    ; Toggle estado de alarma
-    lds r16, alarm_enabled
-    com r16
-    sts alarm_enabled, r16
-    
-alarm_off_end:
-    call debounce_delay
-    pop r16
-    ret
-
-; Rutina de retardo para debounce
-debounce_delay:
-    push r16
-    push r17
-    push r18
-    
-    ldi r16, 50      ; Ajustar según necesidad
-delay_loop1:
-    ldi r17, 255
-delay_loop2:
-    ldi r18, 255
-delay_loop3:
-    dec r18
-    brne delay_loop3
-    dec r17
-    brne delay_loop2
-    dec r16
-    brne delay_loop1
-    
-    pop r18
-    pop r17
-    pop r16
-    ret
-
-; Conversión BCD
-convert_to_bcd:
-    push r18
-    clr r17                    ; Contador de decenas
-    
-bcd_loop:
-    cpi r16, 10
-    brlo bcd_end              ; Si es menor que 10, terminamos
-    inc r17                   ; Incrementar decenas
-    subi r16, 10             ; Restar 10
-    jmp bcd_loop
-    
-bcd_end:
-    pop r18
-    ret
-
-	; Rutinas de incremento/decremento de hora y minutos
-increment_hour:
-    push r16
-    
-    lds r16, current_hours
-    inc r16
-    cpi r16, 24
-    brne save_inc_hour
-    clr r16
-save_inc_hour:
-    sts current_hours, r16
-    call update_time_display
-    
-    pop r16
-    ret
-
-decrement_hour:
-    push r16
-    
-    lds r16, current_hours
-    dec r16
-    cpi r16, 0xFF
-    brne save_dec_hour
-    ldi r16, 23
-save_dec_hour:
-    sts current_hours, r16
-    call update_time_display
-    
-    pop r16
-    ret
-
-increment_minute:
-    push r16
-    
-    lds r16, current_minutes
-    inc r16
-    cpi r16, 60
-    brne save_inc_minute
-    clr r16
-save_inc_minute:
-    sts current_minutes, r16
-    call update_time_display
-    
-    pop r16
-    ret
-
-decrement_minute:
-    push r16
-    
-    lds r16, current_minutes
-    dec r16
-    cpi r16, 0xFF
-    brne save_dec_minute
-    ldi r16, 59
-save_dec_minute:
-    sts current_minutes, r16
-    call update_time_display
-    
-    pop r16
-    ret
-
-; Rutinas de incremento/decremento de mes
-increment_month:
-    push r16
-    
-    lds r16, current_month
-    inc r16
     cpi r16, 13
-    brne save_inc_month
+    brlo exit_verify_mes
+    ldi r16, 0
+    mov mes_h, r16
     ldi r16, 1
-save_inc_month:
-    sts current_month, r16
-    call validate_day
-    call update_date_display
-    
-    pop r16
-    ret
+    mov mes_l, r16
 
-decrement_month:
-    push r16
-    
-    lds r16, current_month
-    dec r16
-    cpi r16, 0
-    brne save_dec_month
-    ldi r16, 12
-save_dec_month:
-    sts current_month, r16
-    call validate_day
-    call update_date_display
-    
-    pop r16
-    ret
-
-; Rutinas de decremento de día
-decrement_day:
-    push r16
-    push r17
-    push ZL
-    push ZH
-    
-    lds r16, current_day
-    dec r16
-    cpi r16, 0
-    brne save_dec_day
-    
-    ; Cargar último día del mes
-    lds r17, current_month
-    dec r17
-    ldi ZL, LOW(2*days_in_month)
-    ldi ZH, HIGH(2*days_in_month)
-    add ZL, r17
-    lpm r16, Z
-    
-save_dec_day:
-    sts current_day, r16
-    call update_date_display
-    
-    pop ZH
-    pop ZL
-    pop r17
-    pop r16
-    ret
-
-; Rutinas de incremento/decremento de alarma
-increment_alarm_hour:
-    push r16
-    
-    lds r16, alarm_hours
-    inc r16
-    cpi r16, 24
-    brne save_inc_alarm_h
-    clr r16
-save_inc_alarm_h:
-    sts alarm_hours, r16
-    call update_alarm_display
-    
-    pop r16
-    ret
-
-decrement_alarm_hour:
-    push r16
-    
-    lds r16, alarm_hours
-    dec r16
-    cpi r16, 0xFF
-    brne save_dec_alarm_h
-    ldi r16, 23
-save_dec_alarm_h:
-    sts alarm_hours, r16
-    call update_alarm_display
-    
-    pop r16
-    ret
-
-increment_alarm_minute:
-    push r16
-    
-    lds r16, alarm_minutes
-    inc r16
-    cpi r16, 60
-    brne save_inc_alarm_m
-    clr r16
-save_inc_alarm_m:
-    sts alarm_minutes, r16
-    call update_alarm_display
-    
-    pop r16
-    ret
-
-decrement_alarm_minute:
-    push r16
-    
-    lds r16, alarm_minutes
-    dec r16
-    cpi r16, 0xFF
-    brne save_dec_alarm_m
-    ldi r16, 59
-save_dec_alarm_m:
-    sts alarm_minutes, r16
-    call update_alarm_display
-    
-    pop r16
-    ret
-
-; Rutina de validación de día al cambiar mes
-validate_day:
-    push r16
-    push r17
-    push ZL
-    push ZH
-    
-    ; Verificar que el día actual es válido para el nuevo mes
-    lds r16, current_day
-    lds r17, current_month
-    dec r17
-    
-    ldi ZL, LOW(2*days_in_month)
-    ldi ZH, HIGH(2*days_in_month)
-    add ZL, r17
-    lpm r17, Z
-    
-    cp r16, r17
-    brlo validate_day_end
-    sts current_day, r17
-    
-validate_day_end:
-    pop ZH
-    pop ZL
-    pop r17
+exit_verify_mes:
     pop r16
     ret
